@@ -1,96 +1,87 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Error};
-use std::io::Read;
-use serde_json;
-use serde::{Serialize, Deserialize};
-use validator_derive::{Validate};
-use validator::{Validate};
 use futures::{Stream, Future};
-use json::JsonValue;
 
-#[derive(Serialize, Deserialize, Validate, Debug)]
-struct User {
-    id: i8,  
-    #[validate(length(min = 3))]      
-    name: String,
-    #[validate(email)]
-    email: String
+const URL: &str = "http://localhost:8545";
+
+enum CommonError {
+    ActixError(actix_web::error::Error),
+    Web3Error(web3::error::Error),
+    StrError(std::str::Utf8Error),
 }
 
-const REMOTE_URL: &str = "https://jsonplaceholder.typicode.com/users";
-
-fn send_user(user: &User) -> Result<reqwest::Response, reqwest::Error> {
-    let client = reqwest::Client::new();
-    client.post(REMOTE_URL)
-            .json(&user)
-            .send()
-}
-
-// Get users
-fn get_user() -> HttpResponse {
-
-    let mut buf = String::new();
-
-    // Send request
-    match reqwest::get(REMOTE_URL) {
-        Ok(mut r) => { 
-            // Read response body
-            match r.read_to_string(&mut buf) {
-                Ok(_) => {
-                    // Parse response body
-                    match serde_json::from_str(&mut buf) {
-                        Ok(obj) => {
-                            // Cast response into struct
-                            let _out: Vec<User> = obj;
-                            return HttpResponse::Ok().json(&_out);
-                        },
-                        Err(_) => HttpResponse::UnsupportedMediaType().body("JSON Parsing error\n")
-                    }
-                },
-                Err(_)=>HttpResponse::UnprocessableEntity().body("Data reading error\n")
-            }
-        },
-        Err(_)=> HttpResponse::BadGateway().body("Connection error\n")
+impl From<actix_web::error::Error> for CommonError {
+    fn from(error: actix_web::error::Error) -> Self {
+        CommonError::ActixError(error)
     }
-  
 }
 
-fn post_user(payload: web::Payload) -> impl Future<Item = HttpResponse, Error = Error> {
+impl From<web3::error::Error> for CommonError {
+    fn from(error: web3::error::Error) -> Self {
+        CommonError::Web3Error(error)
+    }
+}
+
+impl From<std::str::Utf8Error> for CommonError {
+    fn from(error: std::str::Utf8Error) -> Self {
+        CommonError::StrError(error)
+    }
+}
+
+// Get block number
+fn get_blocknumber() -> Result<HttpResponse, CommonError> {
+    let (_eloop, http) = web3::transports::Http::new(URL)?;
+    let web3 = web3::Web3::new(http);
+    
+    let block = web3.eth().block_number().wait()?;
+
+    Ok(HttpResponse::Ok().json(&block))
+}
+
+fn get_accounts() -> Result<HttpResponse, CommonError> {
+    let (_eloop, http) = web3::transports::Http::new(URL)?;
+    let web3 = web3::Web3::new(http);
+    
+    let accounts = web3.eth().accounts().wait()?;
+
+    Ok(HttpResponse::Ok().json(&accounts))
+}
+
+fn create_account(payload: web::Payload) -> impl Future<Item=Result<HttpResponse, CommonError>> {
      payload.concat2().from_err().and_then(|body| {
-         let _b = std::str::from_utf8(&body).unwrap();
+         let _b = std::str::from_utf8(&body)?;
          // Parse input
-        let result = json::parse(_b);
-        let mut injson = match result {
+        let result = json::parse(_b)?;
+/*         let injson = match result {
             Ok(v) => v,
             Err(e) => json::object! {"err" => e.to_string() },
-        };
+        }; */
         // Amend id if it is not exist
-        if !injson.has_key("id") { injson["id"] = JsonValue::from(11); }
+        let password = result["password"].as_str()?;
+    
+        let (_eloop, http) = web3::transports::Http::new(URL)?;
+        let web3 = web3::Web3::new(http);
 
-        let user: User = serde_json::from_str(&injson.dump()).unwrap();
-
-        // Validate user record
-        match user.validate() {
-            Ok(_) => {
-                match send_user(&user) {
-                    Ok(_)  => return HttpResponse::Ok().body(format!("Successful upload: {:?}\n", user)),
-                    Err(_) => return HttpResponse::UnprocessableEntity().body("!!! Upload error !!!\n")
-                }          
-            }
-            Err(_) => HttpResponse::UnprocessableEntity().body("Validation error\n")
-        }
+        let new_account = web3.personal().new_account(&password).wait()?;
+        Ok(HttpResponse::Ok().json(&new_account))
 
     })
 }
+
+fn req_handler(f: &Fn()->Result<HttpResponse, CommonError>) -> HttpResponse {
+    f();
+    HttpResponse::Ok().finish()
+} 
 
 
 pub fn run() {
     HttpServer::new(|| {
         App::new()
-            .route("/api/v1/users", web::get().to(get_user))
-            .route("/api/v1/users", web::post().to_async(post_user))
+            .route("/blocknumber", web::get().to(req_handler(&get_blocknumber)))
+            .route("/accounts", web::get().to(get_accounts))
+            .route("/accounts", web::post().to_async(create_account))
     })
-    .bind("0.0.0.0:3020")
-    .expect("Can not bind to port 3020")
+    .bind("0.0.0.0:3010")
+    .expect("Can not bind to port 3010")
     .run()
     .unwrap();
 }
